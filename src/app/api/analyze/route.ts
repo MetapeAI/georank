@@ -11,24 +11,22 @@ import {
   calcAiTrafficScore,
   calcDomainScore,
   calcCwvScore,
+  calcThirdPartyScore,
   calcOverall,
 } from "@/lib/scoring";
 
-// Store running analyses in memory (MVP — no DB)
 const analyses = new Map<string, any>();
 
 export async function POST(req: NextRequest) {
   const { url } = await req.json();
   if (!url) return NextResponse.json({ error: "URL is required" }, { status: 400 });
 
-  // Normalize URL
   let targetUrl = url.trim();
   if (!targetUrl.startsWith("http")) targetUrl = "https://" + targetUrl;
 
   const id = crypto.randomUUID();
   analyses.set(id, { status: "running", url: targetUrl, startedAt: Date.now(), progress: 0 });
 
-  // Run analysis in background
   runAnalysis(id, targetUrl);
 
   return NextResponse.json({ id, status: "running" });
@@ -37,7 +35,6 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get("id");
   if (!id) {
-    // Return all analyses
     const all = Array.from(analyses.entries()).map(([id, data]) => ({ id, ...data }));
     return NextResponse.json(all);
   }
@@ -63,7 +60,7 @@ async function runAnalysis(id: string, url: string) {
     errors.push(`SimilarWeb: ${e.message}`);
   }
 
-  // 2. Ahrefs
+  // 2. Ahrefs (returns merged object by type)
   update({ progress: 30, step: "Fetching Ahrefs data..." });
   try {
     results.ahrefs = await fetchAhrefs(url);
@@ -72,15 +69,15 @@ async function runAnalysis(id: string, url: string) {
   }
 
   // 3. Semrush
-  update({ progress: 45, step: "Fetching Semrush data..." });
+  update({ progress: 50, step: "Fetching Semrush data..." });
   try {
     results.semrush = await fetchSemrush(url);
   } catch (e: any) {
     errors.push(`Semrush: ${e.message}`);
   }
 
-  // 4. PageSpeed (mobile + desktop)
-  update({ progress: 60, step: "Running PageSpeed analysis..." });
+  // 4. PageSpeed (mobile + desktop in parallel)
+  update({ progress: 65, step: "Running PageSpeed analysis..." });
   try {
     const [mobile, desktop] = await Promise.all([
       fetchPageSpeed(url, "mobile"),
@@ -96,40 +93,26 @@ async function runAnalysis(id: string, url: string) {
   try {
     const domain = new URL(url).hostname.replace("www.", "");
     const brandName = domain.split(".")[0];
-    results.tavily = await fetchTavily(`${brandName} reviews site:reddit.com OR site:producthunt.com OR site:g2.com OR site:linkedin.com`);
+    results.tavily = await fetchTavily(
+      `${brandName} reviews site:reddit.com OR site:producthunt.com OR site:g2.com OR site:linkedin.com OR site:github.com OR site:youtube.com`
+    );
   } catch (e: any) {
     errors.push(`Tavily: ${e.message}`);
   }
 
   // 6. Calculate scores
-  update({ progress: 90, step: "Calculating scores..." });
+  update({ progress: 95, step: "Calculating scores..." });
 
   const traffic = calcTrafficScore(results.similarweb);
   const aiTraffic = calcAiTrafficScore(results.similarweb);
   const domainAuthority = calcDomainScore(results.ahrefs, results.semrush);
   const coreWebVitals = calcCwvScore(results.pagespeed?.mobile, results.pagespeed?.desktop);
+  const thirdParty = calcThirdPartyScore(results.tavily);
 
-  // Tech infra and content scores need browser audit — placeholder for MVP
-  const techInfra = { score: 0, details: "Requires browser audit (coming soon)" };
-  const onPageSeo = { score: 0, details: "Requires browser audit (coming soon)" };
-  const content = { score: 0, details: "Requires manual review (coming soon)" };
-  const thirdParty = { score: 0, details: "Requires manual review (coming soon)" };
-
-  // Check tavily results for third-party presence
-  if (results.tavily?.results) {
-    const platforms = new Set<string>();
-    for (const r of results.tavily.results) {
-      const u = r.url || "";
-      if (u.includes("reddit.com")) platforms.add("Reddit");
-      if (u.includes("producthunt.com")) platforms.add("Product Hunt");
-      if (u.includes("g2.com")) platforms.add("G2");
-      if (u.includes("linkedin.com")) platforms.add("LinkedIn");
-      if (u.includes("github.com")) platforms.add("GitHub");
-      if (u.includes("youtube.com")) platforms.add("YouTube");
-    }
-    thirdParty.score = Math.min(10, platforms.size * 2);
-    thirdParty.details = `Found on: ${Array.from(platforms).join(", ") || "None detected"}`;
-  }
+  // Placeholder scores for browser-audit modules
+  const techInfra = { score: 0, details: "Requires browser audit (coming in v2)" };
+  const onPageSeo = { score: 0, details: "Requires browser audit (coming in v2)" };
+  const content = { score: 0, details: "Requires manual review (coming in v2)" };
 
   const scoreCard = { traffic, aiTraffic, domainAuthority, techInfra, coreWebVitals, onPageSeo, content, thirdParty };
   const overall = calcOverall(scoreCard);
