@@ -9,8 +9,11 @@ interface ScoreItem {
 interface AnalysisResult {
   id: string;
   status: string;
+  url?: string;
   progress: number;
   step?: string;
+  startedAt?: number;
+  completedAt?: number;
   scores?: {
     traffic: ScoreItem;
     aiTraffic: ScoreItem;
@@ -24,6 +27,23 @@ interface AnalysisResult {
   };
   results?: any;
   errors?: string[];
+}
+
+// LocalStorage helpers
+function saveAnalysisId(id: string, url: string) {
+  const history = JSON.parse(localStorage.getItem("georank_history") || "[]");
+  history.unshift({ id, url, startedAt: Date.now() });
+  localStorage.setItem("georank_history", JSON.stringify(history.slice(0, 20)));
+  localStorage.setItem("georank_active", id);
+}
+function getActiveId(): string | null {
+  return localStorage.getItem("georank_active");
+}
+function clearActiveId() {
+  localStorage.removeItem("georank_active");
+}
+function getHistory(): { id: string; url: string; startedAt: number }[] {
+  return JSON.parse(localStorage.getItem("georank_history") || "[]");
 }
 
 function ScoreRing({ score, size = 120 }: { score: number; size?: number }) {
@@ -82,34 +102,80 @@ function RawDataSection({ title, data }: { title: string; data: any }) {
   );
 }
 
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
 
   const poll = useCallback(async (id: string) => {
-    const res = await fetch(`/api/analyze?id=${id}`);
-    const data = await res.json();
-    setAnalysis(data);
-    if (data.status === "running") {
-      setTimeout(() => poll(id), 3000);
-    } else {
-      setLoading(false);
+    try {
+      const res = await fetch(`/api/analyze?id=${id}`);
+      if (!res.ok) {
+        setLoading(false);
+        clearActiveId();
+        return;
+      }
+      const data = await res.json();
+      setAnalysis(data);
+      if (data.status === "running") {
+        setTimeout(() => poll(id), 3000);
+      } else {
+        setLoading(false);
+        clearActiveId();
+      }
+    } catch {
+      // Network error — retry in 5s
+      setTimeout(() => poll(id), 5000);
     }
   }, []);
+
+  // On mount: check if there's an active analysis to resume
+  useEffect(() => {
+    const activeId = getActiveId();
+    if (activeId) {
+      setLoading(true);
+      poll(activeId);
+    }
+  }, [poll]);
+
+  // Elapsed timer
+  useEffect(() => {
+    if (!loading || !analysis?.startedAt) return;
+    const interval = setInterval(() => {
+      setElapsed(Date.now() - (analysis.startedAt || Date.now()));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [loading, analysis?.startedAt]);
 
   const startAnalysis = async () => {
     if (!url.trim()) return;
     setLoading(true);
     setAnalysis(null);
+    setElapsed(0);
     const res = await fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: url.trim() }),
     });
     const data = await res.json();
-    setAnalysis({ ...data, progress: 0 });
+    saveAnalysisId(data.id, url.trim());
+    setAnalysis({ ...data, progress: 0, startedAt: Date.now() });
     poll(data.id);
+  };
+
+  const loadHistoryItem = (id: string) => {
+    setLoading(true);
+    setShowHistory(false);
+    poll(id);
   };
 
   return (
@@ -117,22 +183,23 @@ export default function Home() {
       {/* Header */}
       <div className="text-center mb-12">
         <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent mb-3">
-          SEO + GEO Analyzer
+          GEOrank
         </h1>
         <p className="text-gray-400 text-lg">
-          Comprehensive website analysis powered by SimilarWeb, Ahrefs, Semrush & PageSpeed
+          SEO + GEO Analysis — Know where you stand with AI search engines
         </p>
       </div>
 
       {/* Input */}
-      <div className="flex gap-3 mb-10">
+      <div className="flex gap-3 mb-4">
         <input
           type="text"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && startAnalysis()}
+          onKeyDown={(e) => e.key === "Enter" && !loading && startAnalysis()}
           placeholder="Enter website URL (e.g. onspace.ai)"
           className="flex-1 px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          disabled={loading}
         />
         <button
           onClick={startAnalysis}
@@ -143,6 +210,39 @@ export default function Home() {
         </button>
       </div>
 
+      {/* History toggle */}
+      <div className="flex justify-end mb-8">
+        <button
+          onClick={() => setShowHistory(!showHistory)}
+          className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+        >
+          {showHistory ? "Hide history" : "View history"}
+        </button>
+      </div>
+
+      {/* History panel */}
+      {showHistory && (
+        <div className="mb-8 p-4 bg-gray-900 rounded-xl border border-gray-800">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">Recent Analyses</h3>
+          {getHistory().length === 0 ? (
+            <p className="text-xs text-gray-500">No history yet</p>
+          ) : (
+            <div className="space-y-2">
+              {getHistory().map((h) => (
+                <button
+                  key={h.id}
+                  onClick={() => loadHistoryItem(h.id)}
+                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-gray-800 transition-colors flex justify-between items-center"
+                >
+                  <span className="text-sm text-gray-300">{h.url}</span>
+                  <span className="text-xs text-gray-600">{new Date(h.startedAt).toLocaleString()}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Progress */}
       {analysis?.status === "running" && (
         <div className="mb-10 p-6 bg-gray-900 rounded-2xl border border-gray-800">
@@ -150,11 +250,19 @@ export default function Home() {
             <span className="text-sm text-gray-400">{analysis.step || "Starting..."}</span>
             <span className="text-sm text-blue-400 font-mono">{analysis.progress || 0}%</span>
           </div>
-          <div className="w-full bg-gray-800 rounded-full h-3">
+          <div className="w-full bg-gray-800 rounded-full h-3 mb-3">
             <div
               className="bg-blue-500 h-3 rounded-full transition-all duration-500"
               style={{ width: `${analysis.progress || 0}%` }}
             />
+          </div>
+          <div className="flex justify-between">
+            <span className="text-xs text-gray-600">
+              ⏱ Elapsed: {formatDuration(elapsed)}
+            </span>
+            <span className="text-xs text-gray-600">
+              Apify scrapers may take 3-8 minutes. Please wait...
+            </span>
           </div>
         </div>
       )}
@@ -166,13 +274,16 @@ export default function Home() {
           <div className="p-8 bg-gray-900 rounded-2xl border border-gray-800 flex items-center gap-8">
             <ScoreRing score={analysis.scores.overall} size={140} />
             <div>
-              <h2 className="text-2xl font-bold text-white mb-1">Overall Score</h2>
-              <p className="text-gray-400">
+              <h2 className="text-2xl font-bold text-white mb-1">Overall Score: {analysis.scores.overall}/10</h2>
+              <p className="text-gray-400 mb-2">
                 {analysis.scores.overall >= 7
                   ? "Strong foundation — focus on optimization"
                   : analysis.scores.overall >= 4
                   ? "Decent base — significant room for improvement"
                   : "Needs attention — critical issues found"}
+              </p>
+              <p className="text-xs text-gray-600">
+                Analyzed: {analysis.url} | Duration: {analysis.completedAt && analysis.startedAt ? formatDuration(analysis.completedAt - analysis.startedAt) : "N/A"}
               </p>
               {analysis.errors && analysis.errors.length > 0 && (
                 <div className="mt-3">
@@ -212,7 +323,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="mt-16 text-center text-gray-600 text-sm">
-        Built by 小K — OnSpace AI Growth Team
+        GEOrank — SEO + GEO Analysis Tool
       </footer>
     </main>
   );
